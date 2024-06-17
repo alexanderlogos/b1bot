@@ -587,7 +587,7 @@ async def send_broadcast(callback_query: types.CallbackQuery, state: FSMContext)
             else:
                 await bot.send_message(user_id, broadcast_message, reply_markup=keyboard)
         except Exception as e:
-
+            print(f"Error sending message to user {user_id}: {e}")
     await bot.send_message(callback_query.from_user.id, "Рассылка завершена.")
     await state.clear()
     await callback_query.answer()
