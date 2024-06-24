@@ -1,9 +1,10 @@
 import os
 import json
-import sqlite3
 import asyncio
 import qrcode
 import aiohttp
+import aiocron
+import datetime
 from PIL import Image
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
@@ -18,6 +19,8 @@ from instaloader_script import get_latest_instagram_posts
 import pandas as pd
 import urllib.parse
 import random
+import mysql.connector
+import time
 class WalletStates(StatesGroup):
     waiting_for_wallet = State()
 
@@ -28,50 +31,37 @@ bot = Bot(token=settings['bot_token'])
 dp = Dispatcher()
 reminder_tasks = {}
 
-conn = sqlite3.connect('users.db')
-cursor = conn.cursor()
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        lang TEXT,
-        ref_link TEXT,
-        balance INTEGER DEFAULT 0,
-        ref_count INTEGER DEFAULT 0,
-        wallet TEXT,
-        current_task INTEGER DEFAULT 0,
-        balance_q INTEGER DEFAULT 0
-    )
-''')
-conn.commit()
-cursor.execute('''CREATE TABLE IF NOT EXISTS tweet (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tweet_link TEXT
-    )
-''')
-conn.commit()
-cursor.execute('''CREATE TABLE IF NOT EXISTS admins (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT
-    )
-''')
-conn.commit()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS skipped_tasks (
-    user_id INTEGER,
-    task_id INTEGER
+conn = mysql.connector.connect(
+    host="localhost",
+    user="buser",
+    password="buser",
+    database="b1coin"
 )
-""")
-conn.commit()
-latest_tweet = "None"
+cursor = conn.cursor()
+
 async def get_tweet():
     global latest_tweet
-    cursor.execute("SELECT tweet_link FROM tweet DESC LIMIT 1")
+    cursor.execute("SELECT tweet_link FROM tweet ORDER BY id DESC LIMIT 1")
     tweet = cursor.fetchone()
     if tweet:
         latest_tweet = tweet[0]
     return latest_tweet
 asyncio.run(get_tweet())
-    
+latest_posts = [
+    "https://www.instagram.com/p/C8X4FIey21x/",
+    "https://www.instagram.com/p/C8P3NWtRTjH/",
+    "https://www.instagram.com/p/C8K0GrUyo1Q/"
+]
+
+async def update_latest_posts():
+    global latest_posts
+    latest_posts = await get_latest_instagram_posts('b1coin')
+    print(f"Updated latest posts at {datetime.datetime.now()}: {latest_posts}")
+
+# Set the TZ environment variable to a valid time zone, e.g., 'Europe/Berlin'
+os.environ['TZ'] = 'Europe/Berlin'
+# Ensure the time zone information is updated
+time.tzset()
 tasks = [
     {
         "id": 1,
@@ -228,7 +218,7 @@ tasks = [
     }
 ]
 async def is_admin(user_id):
-    cursor.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT 1 FROM admins WHERE user_id = %s", (user_id,))
     return cursor.fetchone() is not None
 
 
@@ -286,10 +276,10 @@ user_panel_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 async def get_user(user_id):
-    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
     return cursor.fetchone()
 async def update_user_task(user_id, task_id):
-    cursor.execute("UPDATE users SET current_task = ? WHERE user_id = ?", (task_id, user_id))
+    cursor.execute("UPDATE users SET current_task = %s WHERE user_id = %s", (task_id, user_id))
     conn.commit()
 
 
@@ -303,10 +293,10 @@ async def show_leaderboard_message(message: types.Message, state: FSMContext):
     cursor.execute("SELECT COUNT(*) FROM users")
     total_users = cursor.fetchone()[0]
 
-    cursor.execute("SELECT user_id, balance FROM users ORDER BY balance DESC, user_id ASC LIMIT 1 OFFSET ?", (total_users - 1,))
+    cursor.execute("SELECT user_id, balance FROM users ORDER BY balance DESC, user_id ASC LIMIT 1 OFFSET %s", (total_users - 1,))
     last_user = cursor.fetchone()
 
-    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT balance FROM users WHERE user_id = %s", (user_id,))
     user_balance = cursor.fetchone()[0]
 
     user_position = "..."
@@ -317,9 +307,9 @@ async def show_leaderboard_message(message: types.Message, state: FSMContext):
             user_position = f"<b>ТЫ {user_rank}. id: {user_id}, Баллы: {user_balance} $B1COIN.</b>"
 
     if user_position == "...":
-        cursor.execute("SELECT COUNT(*) FROM users WHERE balance > ?", (user_balance,))
+        cursor.execute("SELECT COUNT(*) FROM users WHERE balance > %s", (user_balance,))
         user_rank = cursor.fetchone()[0] + 1
-        user_position = f"{user_rank}. id: {user_id}"
+        user_position = f"<b>ТЫ {user_rank}. id: {user_id}, Баллы: {user_balance} $B1COIN.</b>"
 
     leaderboard_text = "Рейтинг:\n\n"
     for rank, (top_user_id, balance) in enumerate(top_users, start=1):
@@ -347,10 +337,10 @@ async def show_leaderboard(callback_query: types.CallbackQuery):
     cursor.execute("SELECT COUNT(*) FROM users")
     total_users = cursor.fetchone()[0]
 
-    cursor.execute("SELECT user_id, balance FROM users ORDER BY balance DESC, user_id ASC LIMIT 1 OFFSET ?", (total_users - 1,))
+    cursor.execute("SELECT user_id, balance FROM users ORDER BY balance DESC, user_id ASC LIMIT 1 OFFSET %s", (total_users - 1,))
     last_user = cursor.fetchone()
 
-    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT balance FROM users WHERE user_id = %s", (user_id,))
     user_balance = cursor.fetchone()[0]
 
     user_position = "..."
@@ -361,7 +351,7 @@ async def show_leaderboard(callback_query: types.CallbackQuery):
             user_position = f"<b>ТЫ {user_rank}. id: {user_id}, Баллы: {user_balance} $B1COIN.</b>"
 
     if user_position == "...":
-        cursor.execute("SELECT COUNT(*) FROM users WHERE balance > ?", (user_balance,))
+        cursor.execute("SELECT COUNT(*) FROM users WHERE balance > %s", (user_balance,))
         user_rank = cursor.fetchone()[0] + 1
         user_position = f"{user_rank}. id: {user_id}"
 
@@ -384,7 +374,7 @@ async def show_leaderboard(callback_query: types.CallbackQuery):
     await callback_query.answer()
 
 async def update_tweet(tweet_link):
-    cursor.execute("UPDATE tweet SET tweet_link = ? WHERE user_id = 0", (tweet_link))
+    cursor.execute("UPDATE tweet SET tweet_link = %s WHERE user_id = 0", (tweet_link))
 async def check_subscriptions(user_id: int):
     for channel in channels:
         try:
@@ -672,8 +662,8 @@ async def send_welcome(message: types.Message):
             pass
 
     user_id = message.from_user.id
-    cursor.execute('SELECT lang, ref_link FROM users WHERE user_id = ?', (user_id,))
-    user = cursor.fetchone()
+    
+    user = await get_user(user_id)
     is_user_admin = await is_admin(user_id)
     if is_user_admin:
         keyboard = ReplyKeyboardMarkup(
@@ -710,21 +700,30 @@ async def send_welcome(message: types.Message):
                 resize_keyboard=True)
 
     if not user:
+        print(f"referrer_id: {referrer_id}")  # Отладочная печать
         ref_link = f"https://t.me/b1coin_bot?start={user_id}"
-        cursor.execute('INSERT INTO users (user_id, lang, ref_link, balance, ref_count) VALUES (?, ?, ?, ?, ?)', (user_id, None, ref_link, 0, 0))
+        cursor.execute(
+            'INSERT INTO users (user_id, lang, ref_link, balance, ref_count, referrer_id, bonus_taked) VALUES (%s, %s, %s, %s, %s, %s, %s)',
+            (user_id, None, ref_link, 0, 0, referrer_id, 0)
+        )
         conn.commit()
-        if referrer_id and referrer_id != user_id:
-            cursor.execute('UPDATE users SET balance = balance + ?, ref_count = ref_count + 1 WHERE user_id = ?', (ref_bonus, referrer_id,))
+        
+        # Проверим вставленное значение
+        cursor.execute('SELECT referrer_id FROM users WHERE user_id = %s', (user_id,))
+        result = cursor.fetchone()
+        print(f"Inserted referrer_id: {result[0]}")  
+        if referrer_id and referrer_id != user_id and await check_subscriptions(user_id) :
+            cursor.execute('UPDATE users SET balance = balance + %s, ref_count = ref_count + 1 WHERE user_id = %s', (ref_bonus, referrer_id,))
             conn.commit()
-            cursor.execute('UPDATE users SET balance = 50 WHERE user_id = ?', (user_id,))
+            cursor.execute('UPDATE users SET balance = 50 WHERE user_id = %s', (user_id,))
             conn.commit()
-            cursor.execute('SELECT balance, ref_count FROM users WHERE user_id = ?', (referrer_id,))
+            cursor.execute('SELECT balance, ref_count FROM users WHERE user_id = %s', (referrer_id,))
             referrer_data = cursor.fetchone()
             await bot.send_message(referrer_id, f"Вы получили {ref_bonus} $B1COIN за приглашение нового пользователя!")
         await message.reply("Select your language:", reply_markup=language_keyboard)
     else:
-        lang = user[0]
-        ref_link = user[1]
+        lang = user[1]
+        ref_link = user[2]
         if lang == 'ru':
             if await check_subscriptions(user_id):
                 photo_path = 'start_image.jpg'
@@ -751,7 +750,7 @@ def is_quiz_completed(task_id):
 async def process_language_selection_ru(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     ref_link = f"https://t.me/b1coin_bot?start={user_id}"
-    cursor.execute('REPLACE INTO users (user_id, lang, ref_link) VALUES (?, ?, ?)', (user_id, 'ru', ref_link))
+    cursor.execute('REPLACE INTO users (user_id, lang, ref_link) VALUES (%s, %s, %s)', (user_id, 'ru', ref_link))
     conn.commit()
     
     await callback_query.message.edit_reply_markup(reply_markup=None)
@@ -764,7 +763,7 @@ async def process_language_selection_ru(callback_query: types.CallbackQuery):
 async def process_language_selection_eng(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     ref_link = f"https://t.me/b1coin_bot?start={user_id}"
-    cursor.execute('REPLACE INTO users (user_id, lang, ref_link) VALUES (?, ?, ?)', (user_id, 'ru', ref_link))
+    cursor.execute('REPLACE INTO users (user_id, lang, ref_link) VALUES (%s, %s, %s)', (user_id, 'ru', ref_link))
     conn.commit()
     
     await callback_query.message.edit_reply_markup(reply_markup=None)
@@ -779,11 +778,25 @@ async def check_subscriptions_callback(callback_query: types.CallbackQuery):
     photo_path = 'start_image.jpg'
     photo = FSInputFile(photo_path)
     user_id = callback_query.from_user.id
-
+    cursor.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
+    user = cursor.fetchone()
+    referrerr_id =  user[7]
+    bonus_taked = user[8]
     if user_id in reminder_tasks:
         reminder_tasks[user_id].cancel()
         del reminder_tasks[user_id]
-    if await check_subscriptions(user_id):
+    if referrerr_id and referrerr_id != user_id and bonus_taked == 0 and await check_subscriptions(user_id):
+                cursor.execute('UPDATE users SET balance = balance + %s, ref_count = ref_count + 1 WHERE user_id = %s', (ref_bonus, referrerr_id,))
+                conn.commit()
+                cursor.execute('UPDATE users SET balance = 50 WHERE user_id = %s', (user_id,))
+                conn.commit()
+                cursor.execute('UPDATE users SET bonus_taked = 1 WHERE user_id = %s', (user_id,))
+                conn.commit()
+                cursor.execute('SELECT balance, ref_count FROM users WHERE user_id = %s', (referrerr_id,))
+                referrer_data = cursor.fetchone()
+                await bot.send_message(referrerr_id, f"Вы получили {ref_bonus} $B1COIN за приглашение нового пользователя!")
+                await bot.send_photo(user_id, photo, caption="🎊 ТОПОВЫЙ AIRDROP $B1COIN \n\nЗарабатывай баллы $B1COIN за каждого приведенного друга! Самые лучшие и честные условия!\nАбсолютно каждый участник получит DROP от $B1COIN.\n\n🎉 А теперь пригласи хотя бы 1 друга по кнопке:", reply_markup=ref_keyboard)
+    elif await check_subscriptions(user_id):
         await bot.send_photo(user_id, photo, caption="🎊 ТОПОВЫЙ AIRDROP $B1COIN \n\nЗарабатывай баллы $B1COIN за каждого приведенного друга! Самые лучшие и честные условия!\nАбсолютно каждый участник получит DROP от $B1COIN.\n\n🎉 А теперь пригласи хотя бы 1 друга по кнопке:", reply_markup=ref_keyboard)
     else:
         photo = FSInputFile("images/2.jpg")
@@ -1135,7 +1148,7 @@ async def handle_wallet_input(message: types.Message, state: FSMContext):
         InlineKeyboardButton(text="Отмена ❌", callback_data="cancell"),
     ]])
     if len(wallet_address) == 48:
-        cursor.execute('UPDATE users SET wallet = ? WHERE user_id = ?', (wallet_address, user_id))
+        cursor.execute('UPDATE users SET wallet = %s WHERE user_id = %s', (wallet_address, user_id))
         conn.commit()
         user = await get_user(user_id)
         await bot.send_message(
@@ -1285,7 +1298,7 @@ async def handle_youtube_answer(message: types.Message, state: FSMContext):
         answer = message.text.strip()
         if answer.lower() == "еженедельный обзор":
             task = tasks[1]
-            cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + ?, current_task = current_task + 1 WHERE user_id = ?", (task['reward'], user_id))
+            cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + %s, current_task = current_task + 1 WHERE user_id = %s", (task['reward'], user_id))
             conn.commit()
 
             await bot.send_message(
@@ -1327,7 +1340,7 @@ async def handle_instagram_answer(message: types.Message, state: FSMContext):
         answer = message.text.strip()
         if answer.lower() == "#b1coin":
             task = tasks[2]
-            cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + ?, current_task = current_task + 1 WHERE user_id = ?", (task['reward'], user_id))
+            cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + %s, current_task = current_task + 1 WHERE user_id = %s", (task['reward'], user_id))
             conn.commit()
 
             await bot.send_message(
@@ -1368,7 +1381,7 @@ async def handle_twitter_answer(message: types.Message, state: FSMContext):
         answer = message.text.strip()
         if answer.lower() == "#b1coinarmy":
             task = tasks[3]
-            cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + ?, current_task = current_task + 1 WHERE user_id = ?", (task['reward'], user_id))
+            cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + %s, current_task = current_task + 1 WHERE user_id = %s", (task['reward'], user_id))
             conn.commit()
 
             await bot.send_message(
@@ -1401,9 +1414,9 @@ async def handle_quiz_answer(callback_query: types.CallbackQuery):
         incorrect_text = task.get('incorrect_text', "Неправильный ответ. Попробуй еще раз.")
         if selected_option == task['correct_option']:
             reward = task['reward']
-            cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + ?, current_task = current_task + 1 WHERE user_id = ?", (reward, user_id))
+            cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + %s, current_task = current_task + 1 WHERE user_id = %s", (reward, user_id))
             conn.commit()
-            cursor.execute("UPDATE users SET balance_q = COALESCE(balance_q, 0) + ? WHERE user_id = ?", (reward, user_id))
+            cursor.execute("UPDATE users SET balance_q = COALESCE(balance_q, 0) + %s WHERE user_id = %s", (reward, user_id))
             conn.commit()
             photo = FSInputFile("images/4.jpg")
             await bot.send_photo(user_id, photo, caption=f"{correct_text}")
@@ -1412,7 +1425,7 @@ async def handle_quiz_answer(callback_query: types.CallbackQuery):
                 photo = FSInputFile("images/15.jpg")
                 await bot.send_photo(user_id, photo, caption=f"Класс! Ты прошел квиз!\n\nСветлые головы нужны нашему комьюнити...\n\nТы заработал {user2[6]} $B1COIN.\n\nВелком проходить следующие задания!")
         else:
-            cursor.execute("UPDATE users SET current_task = current_task + 1 WHERE user_id = ?", (user_id,))
+            cursor.execute("UPDATE users SET current_task = current_task + 1 WHERE user_id = %s", (user_id,))
             conn.commit()
             photo = FSInputFile("images/4.jpg")
             await bot.send_photo(user_id, photo, caption=f"{incorrect_text}")
@@ -1460,12 +1473,6 @@ async def send_next_task(user_id):
                 [InlineKeyboardButton(text="Меню 🪧", callback_data="menu_b")]
             ])
         elif task.get('platform', '') == 'Instagram' and task.get('type') == 'comments':
-            #latest_posts = [
-             #   "https://www.instagram.com/p/C8X4FIey21x/",
-              #  "https://www.instagram.com/p/C8P3NWtRTjH/",
-               # "https://www.instagram.com/p/C8K0GrUyo1Q/"
-            #]
-            latest_posts = await get_latest_instagram_posts('b1coin')
             task['description'] = f"В Instagram-аккаунте токена $B1COIN:\n{latest_posts[0]}\n{latest_posts[1]}\n{latest_posts[2]}\n"
             task_keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="Перейти #1", url=latest_posts[0])],
@@ -1522,7 +1529,7 @@ async def send_next_task(user_id):
                 reply_markup=task_keyboard)  
     else:
         photo = FSInputFile("images/7.jpg")
-        await bot.send_photo(user_id, photo, caption="Пока что заданий больше нет!\n\nПриходи попозже... Еще заработаем с тобой кучу $B1COIN !")
+        await bot.send_photo(user_id, photo, caption="Пока что заданий больше нет!\n\nНо не отчаивайся… Еще заработаем с тобой кучу $B1COIN !\n\n🏎️💨 Возвращайся в меню и приглашай как можно больше людей, чтобы заработать больше $B1COIN !")
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('skip_task_'))
@@ -1531,7 +1538,7 @@ async def handle_skip_task(callback_query: types.CallbackQuery):
     user = await get_user(user_id)
     current_task_id = user[-1]
     task_id = user[-1]
-    cursor.execute("UPDATE users SET current_task =current_task + 1 WHERE user_id = ?", (user_id,))
+    cursor.execute("UPDATE users SET current_task =current_task + 1 WHERE user_id = %s", (user_id,))
     conn.commit()
     if (task_id == 3):
         photo = FSInputFile("images/21.jpg")
@@ -1543,7 +1550,7 @@ async def handle_skip_task(callback_query: types.CallbackQuery):
 async def handle_send_task(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     task_id = int(callback_query.data.split('_')[-1])
-    cursor.execute("UPDATE users SET current_task = ? WHERE user_id = ?", (task_id,user_id,))
+    cursor.execute("UPDATE users SET current_task = %s WHERE user_id = %s", (task_id,user_id,))
     conn.commit()
     await send_next_task(user_id)
     await callback_query.answer()
@@ -1554,10 +1561,10 @@ async def check_comments(callback_query: types.CallbackQuery):
     task_id = user[-1]
     current_task_id = user[-1]
     task = tasks[current_task_id]
-
+    
     if task_id == current_task_id:
-        group_id = task['channel'] 
-
+        group_id = task['channel']
+        
         try:
             comments_data = await get_last_posts_comments(group_id)
             user_commented = any(
@@ -1566,19 +1573,31 @@ async def check_comments(callback_query: types.CallbackQuery):
             )
             if user_commented:
                 reward = task['reward']
-                cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + ?, current_task = current_task + 1 WHERE user_id = ?", (reward, user_id))
+                
+                # Обновление баланса пользователя и текущего задания
+                cursor.execute(
+                    "UPDATE users SET balance = COALESCE(balance, 0) + %s, current_task = current_task + 1 WHERE user_id = %s",
+                    (reward, user_id)
+                )
                 conn.commit()
-                await bot.send_message(user_id, f"Ты заработал {reward} $B1COIN! Теперь у тебя {user[3] + reward if user[3] else reward} $B1COIN.")
+                cursor.execute(
+                    "SELECT balance FROM users WHERE user_id = %s",
+                    (user_id,)
+                )
+                user_balance = cursor.fetchone()[0]
+                
+                await bot.send_message(user_id, f"Ты заработал {reward} $B1COIN! Теперь у тебя {user_balance} $B1COIN.")
                 await send_next_task(user_id)
             else:
                 await bot.send_message(user_id, "Ты еще не оставил комментарий на последних трех постах.")
         except Exception as e:
-            print(e)
-            await bot.send_message(user_id, "Произошла ошибка при проверке комментариев. Попробуйте позже.")
+            print(f"Ошиька {e}")
+
     else:
         await bot.send_message(user_id, "Пожалуйста, сначала выполните текущее задание.")
 
     await callback_query.answer()
+
 
 
 @dp.message(F.text.contains('https://x.com/'))
@@ -1593,7 +1612,7 @@ async def handle_twitter_link(message: types.Message):
             tweet_link = message.text.strip()
             if validate_tweet_link(tweet_link):
                 reward = task['reward']
-                cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + ?, current_task = current_task + 1 WHERE user_id = ?", (reward, user_id))
+                cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + %s, current_task = current_task + 1 WHERE user_id = %s", (reward, user_id))
                 conn.commit()
                 await bot.send_message(
                     user_id,
@@ -1625,7 +1644,7 @@ async def check_task(callback_query: types.CallbackQuery):
         task = tasks[current_task_id]
         reward = task['reward']
         if await check_subscriptions2(user_id):
-            cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + ?, current_task = current_task + 1 WHERE user_id = ?", (reward, user_id))
+            cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + %s, current_task = current_task + 1 WHERE user_id = %s", (reward, user_id))
             conn.commit()
 
             await bot.send_message(
@@ -1649,8 +1668,14 @@ async def check_task(callback_query: types.CallbackQuery):
     await callback_query.answer()
     
 async def main():
+    # Initial update of latest posts
+    await update_latest_posts()
+    
+    # Schedule the update at 9:00 AM every day
+    aiocron.crontab('0 9 * * *', func=update_latest_posts, start=True)
+
+    # Start the bot polling
     await dp.start_polling(bot)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())
-
